@@ -44,6 +44,8 @@ ssl_algorithm('http://www.w3.org/2001/04/xmlenc#aes128-cbc',    'aes-128-cbc', 1
 ssl_algorithm('http://www.w3.org/2001/04/xmlenc#aes256-cbc',    'aes-256-cbc', 32).
 ssl_algorithm('http://www.w3.org/2001/04/xmlenc#aes192-cbc',    'aes-192-cbc', 24).
 
+
+:-meta_predicate(decrypt_xml(+, -, 3, +)).
 decrypt_xml([], [], _, _):- !.
 decrypt_xml([element(ns(_, 'http://www.w3.org/2001/04/xmlenc#'):'EncryptedData', Attributes, EncryptedData)|Siblings], [Decrypted|NewSiblings], KeyCallback, Options):-
         !,
@@ -67,6 +69,8 @@ decrypt_xml([Other|Siblings], [Other|NewSiblings], KeyCallback, Options):-
 %        DecryptedElement will either be an element/3 term or a string as dictacted by
 %        the Type attribute in Attributes.
 %        If Attributes does not contain a Type attribute then we assume it is a string
+
+:-meta_predicate(decrypt_element(+, +, -, 3, +)).
 
 decrypt_element(Attributes, EncryptedData, Decrypted, KeyCallback, Options):-
 	XENC = ns(_, 'http://www.w3.org/2001/04/xmlenc#'),
@@ -151,6 +155,7 @@ apply_ciphertext_transforms(_, [_AnythingElse|_], _):-
 	% FIXME: Not implemented
 	throw(error(implementation_missing('CipherReference transforms are not implemented', _))).
 
+:- meta_predicate determine_key(+,-,3,+).
 determine_key(EncryptedData, Key, KeyCallback, Options):-
 	DS = ns(_, 'http://www.w3.org/2000/09/xmldsig#'),
 	(  memberchk(element(DS:'KeyInfo', _, KeyInfo), EncryptedData)
@@ -162,6 +167,7 @@ determine_key(EncryptedData, Key, KeyCallback, Options):-
 	),
         resolve_key(KeyInfo, Key, KeyCallback, Options).
 
+:- meta_predicate resolve_key(+,-,3,+).
 resolve_key(Info, Key, KeyCallback, Options):-
 	% EncryptedKey
         XENC = 'http://www.w3.org/2001/04/xmlenc#',
