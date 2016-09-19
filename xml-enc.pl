@@ -47,7 +47,7 @@ ssl_algorithm('http://www.w3.org/2001/04/xmlenc#aes192-cbc',    'aes-192-cbc', 2
 decrypt_xml([], [], _, _):- !.
 decrypt_xml([element(ns(_, 'http://www.w3.org/2001/04/xmlenc#'):'EncryptedData', Attributes, EncryptedData)|Siblings], [Decrypted|NewSiblings], KeyCallback, Options):-
         !,
-	decrypt_element(Attributes, EncryptedData, Decrypted, KeyCallback, Options),
+        decrypt_element(Attributes, EncryptedData, Decrypted, KeyCallback, Options),
 	decrypt_xml(Siblings, NewSiblings, KeyCallback, Options).
 
 decrypt_xml([element(Tag, Attributes, Children)|Siblings], [element(Tag, Attributes, NewChildren)|NewSiblings], KeyCallback, Options):-
@@ -82,23 +82,24 @@ decrypt_element(Attributes, EncryptedData, Decrypted, KeyCallback, Options):-
 	),
 
 	% First of all, determine the algorithm used to encrypt the data
-	determine_encryption_algorithm(EncryptedData, Algorithm, IVSize),
+        determine_encryption_algorithm(EncryptedData, Algorithm, IVSize),
 
         % There are now two tasks remaining, and they seem like they ought to be quite simple, but unfortunately they are not
         % First, we must determine the key used to encrypt the message
-	determine_key(EncryptedData, Key, KeyCallback, Options),
+        determine_key(EncryptedData, Key, KeyCallback, Options),
 
         % Then, we must determine what the encrypted data even IS
         % If the message includes a CipherValue then this is straightfoward - the encrypted data is the base64-encoded child
         % of this element.
-        (  memberchk(element(XENC:'CipherValue', _, [CipherValueBase64]), CipherData)
-        -> string_codes(CipherValueBase64, CipherValueBase64Codes),
-           base64(CipherValueCodes, CipherValueBase64Codes, []),
+        (  memberchk(element(XENC:'CipherValue', _, CipherValueElement), CipherData)
+        -> base64_element(CipherValueElement, CipherValueWithIV),
+           string_codes(CipherValueWithIV, CipherValueWithIVCodes),
            length(IVCodes, IVSize),
-           append(IVCodes, CipherCodes, CipherValueCodes),
+           append(IVCodes, CipherCodes, CipherValueWithIVCodes),
            string_codes(IV, IVCodes),
            string_codes(CipherText, CipherCodes),
-           evp_decrypt(CipherText, Algorithm, Key, IV, DecryptedString, [])
+           length(CipherValueWithIVCodes, _),
+           evp_decrypt(CipherText, Algorithm, Key, IV, DecryptedStringWithPadding, [padding(none)])
 	;  memberchk(element(XENC:'CipherReference', CipherReferenceAttributes, CipherReference), CipherData)->
            % However, it is allowed to include CipherReference instead. This is an arbitrary URI and a list of transforms to convert the
            % data identified by that URI into the raw octets that represent the encrypted data
@@ -121,17 +122,29 @@ decrypt_element(Attributes, EncryptedData, Decrypted, KeyCallback, Options):-
            apply_ciphertext_transforms(RawCipherValue, Transforms, CipherValue),
            sub_string(CipherValue, 0, IVSize, _, IV),
            sub_string(CipherValue, IVSize, _, 0, CipherText),
-           evp_decrypt(CipherText, Algorithm, Key, IV, DecryptedString, [])
+           evp_decrypt(CipherText, Algorithm, Key, IV, DecryptedStringWithPadding, [padding(none)])
         ),
+        % The XML-ENC padding scheme does not comply with RFC-1423. This has been noted a few times by people trying to write
+        % XML-ENC decryptors backed by OpenSSL, which insists on compliance. The only recourse we have is to disable padding entirely
+        % and do it in our application
+        xmlenc_padding(DecryptedStringWithPadding, DecryptedString),
         % Now that we have the decrypted data, we can decide whether to turn it into an element or leave it as
         % content
         (  Type == 'http://www.w3.org/2001/04/xmlenc#Element'
         -> setup_call_cleanup(open_string(DecryptedString, StringStream),
-			      load_structure(StringStream, [Decrypted], [dialect(xmlns), keep_prefix(true)]),
+                              load_structure(StringStream, [Decrypted], [dialect(xmlns), keep_prefix(true)]),
                               close(StringStream))
         ;  Decrypted = DecryptedString
 	).
 
+xmlenc_padding(DecryptedStringWithPadding, DecryptedString):-
+        string_length(DecryptedStringWithPadding, _),
+        string_codes(DecryptedStringWithPadding, Codes),
+        append(_, [LastCode], Codes),
+        length(Padding, LastCode),
+        append(DecryptedCodes, Padding, Codes),
+        !,
+        string_codes(DecryptedString, DecryptedCodes).
 
 apply_ciphertext_transforms(CipherValue, [], CipherValue):- !.
 apply_ciphertext_transforms(_, [_AnythingElse|_], _):-
@@ -147,27 +160,31 @@ determine_key(EncryptedData, Key, KeyCallback, Options):-
 	   % by some other channel
 	   existence_error(key_info, EncryptedData)
 	),
-	resolve_key(KeyInfo, Key, KeyCallback, Options).
+        resolve_key(KeyInfo, Key, KeyCallback, Options).
 
 resolve_key(Info, Key, KeyCallback, Options):-
 	% EncryptedKey
-	XENC = ns(_, 'http://www.w3.org/2001/04/xmlenc#'),
-	memberchk(element(XENC:'EncryptedKey', _KeyAttributes, EncryptedKey), Info),
+        XENC = 'http://www.w3.org/2001/04/xmlenc#',
+	memberchk(element(ns(_, XENC):'EncryptedKey', _KeyAttributes, EncryptedKey), Info),
 	!,
 	% The EncryptedKey is slightly different to EncryptedData. For a start, the algorithms used to decrypt the
 	% key are orthogonal to those used for EncryptedData. However we can recursively search for the keys then
 	% decrypt them using the different algorithms as needed
-	memberchk(element(XENC:'EncryptionMethod', MethodAttributes, _EncryptionMethod), EncryptedKey),
+        memberchk(element(ns(_, XENC):'EncryptionMethod', MethodAttributes, EncryptionMethod), EncryptedKey),
         memberchk('Algorithm'=Algorithm, MethodAttributes),
 
 	% Now find the KeyInfo
-	determine_key(EncryptedKey, PrivateKey, KeyCallback, Options),
+        determine_key(EncryptedKey, PrivateKey, KeyCallback, Options),
 
-        memberchk(element(XENC:'CipherData', _, CipherData), EncryptedKey),
-	memberchk(element(XENC:'CipherValue', _, [CipherValueBase64]), CipherData),
-	base64(CipherValue, CipherValueBase64),
+        memberchk(element(ns(_, XENC):'CipherData', _, CipherData), EncryptedKey),
+        memberchk(element(ns(_, XENC):'CipherValue', _, CipherValueElement), CipherData),
+        base64_element(CipherValueElement, CipherValue),
         (  Algorithm == 'http://www.w3.org/2001/04/xmlenc#rsa-oaep-mgf1p'
-	-> rsa_private_decrypt(PrivateKey, CipherValue, Key, [encoding(octet), padding(pkcs_oaep)])
+        -> rsa_private_decrypt(PrivateKey, CipherValue, Key, [encoding(octet), padding(pkcs_oaep)])
+        ;  Algorithm == 'http://www.w3.org/2009/xmlenc11#rsa-oaep',
+           memberchk(element(ns(_, 'http://www.w3.org/2009/xmlenc11#'):'MGF', MGFAttributes, _), EncryptionMethod),
+           memberchk('Algorithm'='http://www.w3.org/2009/xmlenc11#mgf1sha1', MGFAttributes)   % This is just the same as rsa-oaep-mgf1p!
+        -> rsa_private_decrypt(PrivateKey, CipherValue, Key, [encoding(octet), padding(pkcs_oaep)])
         ;  Algorithm == 'http://www.w3.org/2001/04/xmlenc#rsa-1_5'
         -> rsa_private_decrypt(PrivateKey, CipherValue, Key, [encoding(octet), padding(pkcs)])
         ;  domain_error(key_transport, Algorithm)
@@ -289,3 +306,14 @@ determine_encryption_algorithm(EncryptedData, Algorithm, IVSize):-
 	% decrypt_element/3 but for now raise an exception
 	; existence_error(encryption_method, EncryptedData)
 	).
+
+base64_element([CipherValueElement], CipherValue):-
+        atom_codes(CipherValueElement, Base64Codes),
+        delete_newlines(Base64Codes, TrimmedCodes),
+        string_codes(Trimmed, TrimmedCodes),
+        base64(CipherValue, Trimmed).
+
+delete_newlines([], []):- !.
+delete_newlines([13|As], B):- !, delete_newlines(As, B).
+delete_newlines([10|As], B):- !, delete_newlines(As, B).
+delete_newlines([A|As], [A|B]):- !, delete_newlines(As, B).
